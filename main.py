@@ -1,12 +1,14 @@
 from fastapi import FastAPI
 import time
 
+# LIVE ENDPOINTS
 from nba_api.live.nba.endpoints import (
     scoreboard,
     boxscore,
     playbyplay
 )
 
+# STATS ENDPOINTS
 from nba_api.stats.endpoints import (
     LeagueGameFinder,
     CommonAllPlayers,
@@ -17,20 +19,23 @@ from nba_api.stats.endpoints import (
     LeagueDashTeamStats
 )
 
+# STATIC DATA
+from nba_api.stats.static import teams as nba_teams
+
 app = FastAPI(title="NBA Free API", version="1.0")
 
 # -------------------------------------------------
-# SIMPLE CACHE
+# SIMPLE IN-MEMORY CACHE
 # -------------------------------------------------
 
 cache = {}
 
 CACHE_TTL = {
-    "live": 30,            # seconds
-    "playbyplay": 15,      # seconds
-    "advanced": 21600,     # 6 hours
-    "shotchart": 86400,    # 24 hours
-    "team_stats": 21600    # 6 hours
+    "live": 30,
+    "playbyplay": 15,
+    "advanced": 21600,      # 6 hours
+    "shotchart": 86400,     # 24 hours
+    "team_stats": 21600     # 6 hours
 }
 
 def get_cache(key):
@@ -138,10 +143,9 @@ def game_play_by_play(game_id: str):
 
 @app.get("/games")
 def games_history(season: str = "2023-24"):
-    games = LeagueGameFinder(
+    return LeagueGameFinder(
         season_nullable=season
     ).get_dict()
-    return games
 
 # -------------------------------------------------
 # PLAYERS
@@ -149,15 +153,13 @@ def games_history(season: str = "2023-24"):
 
 @app.get("/players")
 def all_players():
-    players = CommonAllPlayers().get_dict()
-    return players
+    return CommonAllPlayers().get_dict()
 
 @app.get("/players/{player_id}")
 def player_career(player_id: str):
-    career = PlayerCareerStats(
+    return PlayerCareerStats(
         player_id=player_id
     ).get_dict()
-    return career
 
 # -------------------------------------------------
 # PLAYER ADVANCED STATS
@@ -223,13 +225,32 @@ def player_shotchart(player_id: str, season: str = "2023-24"):
     return result
 
 # -------------------------------------------------
+# ALL TEAMS (MAPPING ENDPOINT)
+# -------------------------------------------------
+
+@app.get("/teams")
+def all_teams():
+    teams = nba_teams.get_teams()
+
+    result = []
+    for t in teams:
+        result.append({
+            "team_id": t["id"],
+            "full_name": t["full_name"],
+            "abbreviation": t["abbreviation"],
+            "city": t["city"],
+            "nickname": t["nickname"]
+        })
+
+    return {"teams": result}
+
+# -------------------------------------------------
 # TEAM DETAILS
 # -------------------------------------------------
 
 @app.get("/teams/{team_id}")
 def team_info(team_id: int):
-    team = TeamDetails(team_id=team_id).get_dict()
-    return team
+    return TeamDetails(team_id=team_id).get_dict()
 
 # -------------------------------------------------
 # TEAM SEASON STATS (PER TEAM)
