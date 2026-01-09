@@ -39,7 +39,7 @@ from nba_api.stats.static import teams as nba_teams
 # -------------------------------------------------
 # APP
 # -------------------------------------------------
-app = FastAPI(title="NBA Free API", version="1.0")
+app = FastAPI(title="NBA Free API", version="1.1")
 
 # -------------------------------------------------
 # SIMPLE CACHE
@@ -51,7 +51,8 @@ CACHE_TTL = {
     "playbyplay": 15,
     "advanced": 21600,
     "shotchart": 86400,
-    "team_stats": 21600
+    "team_stats": 21600,
+    "meta": 3600
 }
 
 def get_cache(key):
@@ -68,6 +69,37 @@ def set_cache(key, data, ttl):
         "data": data,
         "ttl": ttl
     }
+
+# -------------------------------------------------
+# CURRENT NBA SEASON (STATS-SAFE)
+# -------------------------------------------------
+def compute_current_season():
+    now = datetime.datetime.now()
+    year = now.year
+    month = now.month
+
+    # NBA team stats are unreliable before March
+    if month < 3:
+        start_year = year - 1
+    else:
+        start_year = year
+
+    return f"{start_year}-{str(start_year + 1)[-2:]}"
+
+@app.get("/meta/current-season")
+def current_season():
+    cached = get_cache("current_season")
+    if cached:
+        return cached
+
+    season = compute_current_season()
+    result = {
+        "season": season,
+        "note": "Latest NBA season with reliable team statistics"
+    }
+
+    set_cache("current_season", result, CACHE_TTL["meta"])
+    return result
 
 # -------------------------------------------------
 # ROOT
@@ -106,57 +138,6 @@ def live_games():
     return result
 
 # -------------------------------------------------
-# GAME BOXSCORE
-# -------------------------------------------------
-@app.get("/games/{game_id}")
-def game_boxscore(game_id: str):
-    try:
-        data = boxscore.BoxScore(game_id=game_id).get_dict()
-    except Exception:
-        raise HTTPException(502, "NBA boxscore unavailable")
-
-    game = data.get("game", {})
-    return {
-        "game_id": game_id,
-        "home_team": game.get("homeTeam", {}).get("teamName"),
-        "away_team": game.get("awayTeam", {}).get("teamName"),
-        "players": (
-            game.get("homeTeam", {}).get("players", []) +
-            game.get("awayTeam", {}).get("players", [])
-        )
-    }
-
-# -------------------------------------------------
-# PLAY BY PLAY
-# -------------------------------------------------
-@app.get("/games/{game_id}/playbyplay")
-def game_playbyplay(game_id: str):
-    cache_key = f"pbp_{game_id}"
-    cached = get_cache(cache_key)
-    if cached:
-        return cached
-
-    try:
-        data = playbyplay.PlayByPlay(game_id=game_id).get_dict()
-    except Exception:
-        raise HTTPException(502, "NBA play-by-play unavailable")
-
-    actions = []
-    for a in data.get("game", {}).get("actions", []):
-        actions.append({
-            "clock": a.get("clock"),
-            "period": a.get("period"),
-            "team": a.get("teamTricode"),
-            "description": a.get("description"),
-            "score_home": a.get("scoreHome"),
-            "score_away": a.get("scoreAway")
-        })
-
-    result = {"game_id": game_id, "actions": actions}
-    set_cache(cache_key, result, CACHE_TTL["playbyplay"])
-    return result
-
-# -------------------------------------------------
 # PLAYERS
 # -------------------------------------------------
 @app.get("/players")
@@ -172,69 +153,6 @@ def player_career(player_id: str):
         return PlayerCareerStats(player_id=player_id).get_dict()
     except Exception:
         raise HTTPException(502, "NBA player stats unavailable")
-
-# -------------------------------------------------
-# PLAYER ADVANCED
-# -------------------------------------------------
-@app.get("/players/{player_id}/advanced")
-def player_advanced(player_id: str):
-    cache_key = f"adv_{player_id}"
-    cached = get_cache(cache_key)
-    if cached:
-        return cached
-
-    try:
-        data = PlayerDashboardByGeneralSplits(player_id=player_id).get_dict()
-    except Exception:
-        raise HTTPException(502, "NBA advanced stats unavailable")
-
-    rows = data.get("resultSets", [{}])[0].get("rowSet", [])
-    if not rows:
-        raise HTTPException(502, "NBA advanced stats empty")
-
-    row = rows[0]
-    result = {
-        "player_id": player_id,
-        "true_shooting_pct": row[27],
-        "usage_pct": row[26],
-        "pie": row[30]
-    }
-
-    set_cache(cache_key, result, CACHE_TTL["advanced"])
-    return result
-
-# -------------------------------------------------
-# SHOT CHART
-# -------------------------------------------------
-@app.get("/players/{player_id}/shotchart")
-def player_shotchart(player_id: str, season: str = "2023-24"):
-    cache_key = f"shot_{player_id}_{season}"
-    cached = get_cache(cache_key)
-    if cached:
-        return cached
-
-    try:
-        data = ShotChartDetail(
-            player_id=player_id,
-            team_id=0,
-            season_nullable=season,
-            season_type_all_star="Regular Season"
-        ).get_dict()
-    except Exception:
-        raise HTTPException(502, "NBA shot chart unavailable")
-
-    shots = []
-    for row in data.get("resultSets", [{}])[0].get("rowSet", []):
-        shots.append({
-            "x": row[17],
-            "y": row[18],
-            "made": row[20] == 1,
-            "shot_type": row[9]
-        })
-
-    result = {"player_id": player_id, "season": season, "shots": shots}
-    set_cache(cache_key, result, CACHE_TTL["shotchart"])
-    return result
 
 # -------------------------------------------------
 # ALL TEAMS (MAPPING)
@@ -265,11 +183,13 @@ def team_info(team_id: int):
         raise HTTPException(502, "NBA team info unavailable")
 
 # -------------------------------------------------
-# TEAM SEASON STATS (HARDENED)
+# TEAM SEASON STATS (AUTO CURRENT SEASON)
 # -------------------------------------------------
 @app.get("/teams/{team_id}/stats")
-def team_season_stats(team_id: int, season: str = "2023-24"):
-    # season validation
+def team_season_stats(team_id: int, season: str | None = None):
+    if season is None:
+        season = compute_current_season()
+
     try:
         start_year = int(season.split("-")[0])
     except Exception:
@@ -315,21 +235,9 @@ def team_season_stats(team_id: int, season: str = "2023-24"):
                 "field_goal_pct": team.get("FG_PCT"),
                 "three_point_pct": team.get("FG3_PCT"),
                 "free_throw_pct": team.get("FT_PCT"),
-                "offensive_rating": (
-                    team.get("OFF_RATING")
-                    if team.get("OFF_RATING") is not None
-                    else team.get("OFF_RTG")
-                ),
-                "defensive_rating": (
-                    team.get("DEF_RATING")
-                    if team.get("DEF_RATING") is not None
-                    else team.get("DEF_RTG")
-                ),
-                "net_rating": (
-                    team.get("NET_RATING")
-                    if team.get("NET_RATING") is not None
-                    else team.get("NET_RTG")
-                )
+                "offensive_rating": team.get("OFF_RATING") or team.get("OFF_RTG"),
+                "defensive_rating": team.get("DEF_RATING") or team.get("DEF_RTG"),
+                "net_rating": team.get("NET_RATING") or team.get("NET_RTG")
             }
 
             set_cache(cache_key, result, CACHE_TTL["team_stats"])
