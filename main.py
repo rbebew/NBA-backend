@@ -13,21 +13,24 @@ from nba_api.stats.endpoints import (
     PlayerCareerStats,
     TeamDetails,
     ShotChartDetail,
-    PlayerDashboardByGeneralSplits
+    PlayerDashboardByGeneralSplits,
+    LeagueDashTeamStats
 )
 
 app = FastAPI(title="NBA Free API", version="1.0")
 
-# -------------------
+# -------------------------------------------------
 # SIMPLE CACHE
-# -------------------
+# -------------------------------------------------
 
 cache = {}
+
 CACHE_TTL = {
-    "live": 30,
-    "playbyplay": 15,
-    "advanced": 21600,   # 6 hours
-    "shotchart": 86400   # 24 hours
+    "live": 30,            # seconds
+    "playbyplay": 15,      # seconds
+    "advanced": 21600,     # 6 hours
+    "shotchart": 86400,    # 24 hours
+    "team_stats": 21600    # 6 hours
 }
 
 def get_cache(key):
@@ -44,17 +47,17 @@ def set_cache(key, data, ttl):
         "ttl": ttl
     }
 
-# -------------------
+# -------------------------------------------------
 # ROOT
-# -------------------
+# -------------------------------------------------
 
 @app.get("/")
 def root():
     return {"status": "NBA API running"}
 
-# -------------------
+# -------------------------------------------------
 # LIVE GAMES
-# -------------------
+# -------------------------------------------------
 
 @app.get("/live")
 def live_games():
@@ -79,9 +82,9 @@ def live_games():
     set_cache("live", result, CACHE_TTL["live"])
     return result
 
-# -------------------
+# -------------------------------------------------
 # GAME DETAILS / BOXSCORE
-# -------------------
+# -------------------------------------------------
 
 @app.get("/games/{game_id}")
 def game_boxscore(game_id: str):
@@ -97,9 +100,9 @@ def game_boxscore(game_id: str):
         )
     }
 
-# -------------------
+# -------------------------------------------------
 # PLAY BY PLAY
-# -------------------
+# -------------------------------------------------
 
 @app.get("/games/{game_id}/playbyplay")
 def game_play_by_play(game_id: str):
@@ -129,20 +132,20 @@ def game_play_by_play(game_id: str):
     set_cache(cache_key, result, CACHE_TTL["playbyplay"])
     return result
 
-# -------------------
-# GAMES HISTORY
-# -------------------
+# -------------------------------------------------
+# GAMES HISTORY (SEASON)
+# -------------------------------------------------
 
 @app.get("/games")
 def games_history(season: str = "2023-24"):
-    games = leaguegamefinder.LeagueGameFinder(
+    games = LeagueGameFinder(
         season_nullable=season
     ).get_dict()
     return games
 
-# -------------------
+# -------------------------------------------------
 # PLAYERS
-# -------------------
+# -------------------------------------------------
 
 @app.get("/players")
 def all_players():
@@ -151,23 +154,14 @@ def all_players():
 
 @app.get("/players/{player_id}")
 def player_career(player_id: str):
-    career = playercareerstats.PlayerCareerStats(
+    career = PlayerCareerStats(
         player_id=player_id
     ).get_dict()
     return career
 
-# -------------------
-# TEAMS
-# -------------------
-
-@app.get("/teams/{team_id}")
-def team_info(team_id: str):
-    team = teamdetails.TeamDetails(team_id=team_id).get_dict()
-    return team
-
-# -------------------
-# ADVANCED STATS
-# -------------------
+# -------------------------------------------------
+# PLAYER ADVANCED STATS
+# -------------------------------------------------
 
 @app.get("/players/{player_id}/advanced")
 def player_advanced(player_id: str):
@@ -177,8 +171,8 @@ def player_advanced(player_id: str):
         return cached
 
     data = PlayerDashboardByGeneralSplits(
-    player_id=player_id
-).get_dict()
+        player_id=player_id
+    ).get_dict()
 
     row = data["resultSets"][0]["rowSet"][0]
 
@@ -192,35 +186,9 @@ def player_advanced(player_id: str):
     set_cache(cache_key, result, CACHE_TTL["advanced"])
     return result
 
-# -------------------
-# ON / OFF STATS
-# -------------------
-
-@app.get("/players/{player_id}/onoff")
-def player_onoff(player_id: str):
-    data = PlayerOnOffDetails(
-    player_id=player_id
-).get_dict()
-
-    rows = data["resultSets"][0]["rowSet"]
-
-    return {
-        "player_id": player_id,
-        "on_court": {
-            "net_rating": rows[0][6],
-            "off_rating": rows[0][7],
-            "def_rating": rows[0][8]
-        },
-        "off_court": {
-            "net_rating": rows[1][6],
-            "off_rating": rows[1][7],
-            "def_rating": rows[1][8]
-        }
-    }
-
-# -------------------
-# SHOT CHART
-# -------------------
+# -------------------------------------------------
+# PLAYER SHOT CHART
+# -------------------------------------------------
 
 @app.get("/players/{player_id}/shotchart")
 def player_shotchart(player_id: str, season: str = "2023-24"):
@@ -229,7 +197,7 @@ def player_shotchart(player_id: str, season: str = "2023-24"):
     if cached:
         return cached
 
-    data = shotchartdetail.ShotChartDetail(
+    data = ShotChartDetail(
         player_id=player_id,
         team_id=0,
         season_nullable=season,
@@ -253,3 +221,55 @@ def player_shotchart(player_id: str, season: str = "2023-24"):
 
     set_cache(cache_key, result, CACHE_TTL["shotchart"])
     return result
+
+# -------------------------------------------------
+# TEAM DETAILS
+# -------------------------------------------------
+
+@app.get("/teams/{team_id}")
+def team_info(team_id: int):
+    team = TeamDetails(team_id=team_id).get_dict()
+    return team
+
+# -------------------------------------------------
+# TEAM SEASON STATS (PER TEAM)
+# -------------------------------------------------
+
+@app.get("/teams/{team_id}/stats")
+def team_season_stats(team_id: int, season: str = "2023-24"):
+    cache_key = f"teamstats_{team_id}_{season}"
+    cached = get_cache(cache_key)
+    if cached:
+        return cached
+
+    data = LeagueDashTeamStats(
+        season=season,
+        per_mode_detailed="PerGame"
+    ).get_dict()
+
+    headers = data["resultSets"][0]["headers"]
+    rows = data["resultSets"][0]["rowSet"]
+
+    for row in rows:
+        team = dict(zip(headers, row))
+        if team["TEAM_ID"] == team_id:
+            result = {
+                "team_id": team["TEAM_ID"],
+                "team_name": team["TEAM_NAME"],
+                "season": season,
+                "games_played": team["GP"],
+                "points_per_game": team["PTS"],
+                "rebounds_per_game": team["REB"],
+                "assists_per_game": team["AST"],
+                "field_goal_pct": team["FG_PCT"],
+                "three_point_pct": team["FG3_PCT"],
+                "free_throw_pct": team["FT_PCT"],
+                "offensive_rating": team["OFF_RATING"],
+                "defensive_rating": team["DEF_RATING"],
+                "net_rating": team["NET_RATING"]
+            }
+
+            set_cache(cache_key, result, CACHE_TTL["team_stats"])
+            return result
+
+    return {"error": "Team not found"}
