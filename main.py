@@ -26,7 +26,6 @@ NBAStatsHTTP.headers.update({
 # -------------------------------------------------
 from nba_api.live.nba.endpoints import scoreboard, boxscore, playbyplay
 from nba_api.stats.endpoints import (
-    LeagueGameFinder,
     CommonAllPlayers,
     PlayerCareerStats,
     TeamDetails,
@@ -39,7 +38,7 @@ from nba_api.stats.static import teams as nba_teams
 # -------------------------------------------------
 # APP
 # -------------------------------------------------
-app = FastAPI(title="NBA Free API", version="1.1")
+app = FastAPI(title="NBA Free API", version="2.0")
 
 # -------------------------------------------------
 # SIMPLE CACHE
@@ -48,7 +47,6 @@ cache = {}
 
 CACHE_TTL = {
     "live": 30,
-    "playbyplay": 15,
     "advanced": 21600,
     "shotchart": 86400,
     "team_stats": 21600,
@@ -57,34 +55,21 @@ CACHE_TTL = {
 
 def get_cache(key):
     entry = cache.get(key)
-    if not entry:
-        return None
-    if time.time() - entry["time"] < entry["ttl"]:
+    if entry and time.time() - entry["time"] < entry["ttl"]:
         return entry["data"]
     return None
 
 def set_cache(key, data, ttl):
-    cache[key] = {
-        "time": time.time(),
-        "data": data,
-        "ttl": ttl
-    }
+    cache[key] = {"time": time.time(), "data": data, "ttl": ttl}
 
 # -------------------------------------------------
-# CURRENT NBA SEASON (STATS-SAFE)
+# CURRENT NBA SEASON (STATS SAFE)
 # -------------------------------------------------
 def compute_current_season():
     now = datetime.datetime.now()
     year = now.year
     month = now.month
-
-    # NBA team stats are unreliable before March
-    if month < 3:
-        start_year = year - 1
-    else:
-        start_year = year
-
-    return f"{start_year}-{str(start_year + 1)[-2:]}"
+    return f"{year-1}-{str(year)[-2:]}" if month < 3 else f"{year}-{str(year+1)[-2:]}"
 
 @app.get("/meta/current-season")
 def current_season():
@@ -95,7 +80,7 @@ def current_season():
     season = compute_current_season()
     result = {
         "season": season,
-        "note": "Latest NBA season with reliable team statistics"
+        "note": "Latest NBA season with available team statistics"
     }
 
     set_cache("current_season", result, CACHE_TTL["meta"])
@@ -183,33 +168,39 @@ def team_info(team_id: int):
         raise HTTPException(502, "NBA team info unavailable")
 
 # -------------------------------------------------
-# TEAM SEASON STATS (AUTO CURRENT SEASON)
+# TEAM SEASON STATS (AUTO SEASON + FALLBACK)
 # -------------------------------------------------
 @app.get("/teams/{team_id}/stats")
 def team_season_stats(team_id: int, season: str | None = None):
     if season is None:
         season = compute_current_season()
 
-    try:
-        start_year = int(season.split("-")[0])
-    except Exception:
-        raise HTTPException(400, "Invalid season format (YYYY-YY)")
-
-    if start_year > datetime.datetime.now().year:
-        raise HTTPException(400, "Season not available yet")
-
     cache_key = f"teamstats_{team_id}_{season}"
     cached = get_cache(cache_key)
     if cached:
         return cached
 
-    try:
-        data = LeagueDashTeamStats(
-            season=season,
+    def fetch(season_try):
+        return LeagueDashTeamStats(
+            season=season_try,
             per_mode_detailed="PerGame"
         ).get_dict()
+
+    used_season = season
+    data = None
+
+    # 1️⃣ Try requested/current season
+    try:
+        data = fetch(season)
     except Exception:
-        raise HTTPException(502, "NBA team stats unavailable")
+        # 2️⃣ Fallback to previous season
+        try:
+            start_year = int(season.split("-")[0]) - 1
+            fallback = f"{start_year}-{str(start_year + 1)[-2:]}"
+            data = fetch(fallback)
+            used_season = fallback
+        except Exception:
+            raise HTTPException(502, "NBA team stats unavailable")
 
     result_sets = data.get("resultSets", [])
     if not result_sets:
@@ -227,7 +218,7 @@ def team_season_stats(team_id: int, season: str | None = None):
             result = {
                 "team_id": team_id,
                 "team_name": team.get("TEAM_NAME"),
-                "season": season,
+                "season": used_season,
                 "games_played": team.get("GP"),
                 "points_per_game": team.get("PTS"),
                 "rebounds_per_game": team.get("REB"),
