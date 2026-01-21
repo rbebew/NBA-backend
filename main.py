@@ -1,18 +1,39 @@
+
 from fastapi import FastAPI, HTTPException
-import requests
-from datetime import datetime
 from nba_api.stats.endpoints import (
-    leaguegamefinder
+    leaguegamefinder,
+    teamdashlineups,
+leaguedashplayerstats
 )
+
 from datetime import date
 import pandas as pd
-
+import requests
 app = FastAPI(title="NBA Boxscore API", version="1.0")
 
 NBA_HEADERS = {
     "User-Agent": "Mozilla/5.0",
     "Referer": "https://www.nba.com/"
 }
+# -------------------------------------------------
+# HEADERS
+# -------------------------------------------------
+
+NBA_HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Referer": "https://www.nba.com/"
+}
+
+NBA_STATS_HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Referer": "https://www.nba.com/",
+    "Origin": "https://www.nba.com",
+    "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9"
+}
+
+
+
 
 # -------------------------------------------------
 # Helper: fetch JSON safely
@@ -169,9 +190,103 @@ def upcoming():
         if parse_utc(g["gameDateTimeUTC"]) > now
     ]
 
-# -------------------
-# LIVE DATA
-# -------------------
+# -------------------------------------------------
+# 6️⃣ Team stats
+# -------------------------------------------------
+@app.get("/teams/{team_id}/Teamstats")
+def team_lineups(
+    team_id: int,
+    season: str = "2025-26",
+    season_type: str = "Regular Season"
+):
+    try:
+        lineups = teamdashlineups.TeamDashLineups(
+            team_id=team_id,
+            season=season,
+            season_type_all_star=season_type,
+            per_mode_detailed="PerGame"
+        )
+
+        df = lineups.get_data_frames()[0]
+
+        return {
+            "team_id": team_id,
+            "season": season,
+            "season_type": season_type,
+            "lineups": df.to_dict(orient="records")
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"NBA TeamDashLineups error: {str(e)}"
+        )
+
+# -------------------------------------------------
+# 6️⃣ player stats
+# -------------------------------------------------
+
+from fastapi import HTTPException
+from nba_api.stats.endpoints import leaguedashplayerstats
+
+@app.get("/teams/{team_id}/playerstats")
+def team_player_stats(
+    team_id: int,
+    season: str = "2025-26",
+    season_type: str = "Regular Season"
+):
+    try:
+        players = leaguedashplayerstats.LeagueDashPlayerStats(
+            season=season,
+            season_type_all_star=season_type,
+            team_id_nullable=team_id,
+            per_mode_detailed="PerGame"
+        )
+
+        df = players.get_data_frames()[0]
+
+        return {
+            "team_id": team_id,
+            "season": season,
+            "season_type": season_type,
+            "players": df.to_dict(orient="records")
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"NBA LeagueDashPlayerStats error: {str(e)}"
+        )
+# -------------------------------------------------
+# 8️⃣ Daily Lineups (stats.nba.com)
+# -------------------------------------------------
+@app.get("/lineups/daily")
+def daily_lineups(date: str = None):
+    """
+    date format: YYYYMMDD
+    default = i dag (UTC)
+    """
+    if not date:
+        date = datetime.utcnow().strftime("%Y%m%d")
+
+    url = (
+        "https://stats.nba.com/js/data/leaders/"
+        f"00_daily_lineups_{date}.json"
+    )
+
+    try:
+        r = requests.get(url, headers=NBA_STATS_HEADERS, timeout=10)
+        r.raise_for_status()
+        return {
+            "date": date,
+            "data": r.json()
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"NBA daily lineups unavailable: {str(e)}"
+        )
+
 
 
 # -------------------------------------------------
