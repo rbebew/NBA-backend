@@ -194,7 +194,7 @@ def upcoming():
 # 6️⃣ Team stats
 # -------------------------------------------------
 @app.get("/teams/{team_id}/Teamstats")
-def team_lineups(
+def team_stats(
     team_id: int,
     season: str = "2025-26",
     season_type: str = "Regular Season"
